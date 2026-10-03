@@ -155,7 +155,7 @@ def login_user(request):
     POST /api/auth/login/
     Validates user credentials, returns JWT pair & user profile payload.
     """
-    email = request.data.get('email', '').strip().lower()
+    email = (request.data.get('email') or request.data.get('username') or '').strip().lower()
     password = request.data.get('password', '')
 
     if not email or not password:
