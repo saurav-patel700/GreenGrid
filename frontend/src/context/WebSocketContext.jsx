@@ -18,7 +18,21 @@ export function WebSocketProvider({ children }) {
     }
 
     const token = getAccessToken();
-    const wsUrl = `ws://localhost:8000/ws/org/${organization.id}/?token=${token}`;
+    let wsBaseUrl = import.meta.env.VITE_WS_URL;
+    if (!wsBaseUrl) {
+      if (import.meta.env.VITE_API_BASE_URL) {
+        try {
+          const parsed = new URL(import.meta.env.VITE_API_BASE_URL);
+          const proto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+          wsBaseUrl = `${proto}//${parsed.host}`;
+        } catch {
+          wsBaseUrl = 'ws://localhost:8000';
+        }
+      } else {
+        wsBaseUrl = 'ws://localhost:8000';
+      }
+    }
+    const wsUrl = `${wsBaseUrl}/ws/org/${organization.id}/?token=${token}`;
 
     setConnectionStatus('Reconnecting');
 
