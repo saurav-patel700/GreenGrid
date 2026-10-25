@@ -6,12 +6,12 @@ from datetime import datetime, timedelta, timezone as dt_tz
 from django.utils import timezone
 import zoneinfo
 
-def parse_date_range(range_key="7d", start_str=None, end_str=None, org_timezone="America/Chicago"):
+def parse_date_range(range_key="7d", start_str=None, end_str=None, org_timezone="America/Chicago", anchor_dt=None):
     """
     Parses date range options: 24h, 7d, 30d, 90d, YTD, custom.
     Returns (start_dt, end_dt, comparison_start_dt, comparison_end_dt, label).
     """
-    now = timezone.now()
+    now = anchor_dt or timezone.now()
     range_clean = (range_key or "7d").lower()
 
     if start_str and end_str and range_clean == "custom":

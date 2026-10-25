@@ -5,12 +5,23 @@ facility comparisons, energy intensity, and data quality.
 """
 
 from decimal import Decimal
+from datetime import timedelta
 from django.db.models import Sum, Avg, Max, Min, Count, Q, F
 from django.db.models.functions import TruncHour, TruncDay, TruncMinute
 from django.utils import timezone
 
 from core.models import Facility, Meter, EnergyReading, RenewableAsset, Alert
 from core.services.date_utils import parse_date_range, determine_aggregation
+
+def _get_org_anchor(org):
+    now = timezone.now()
+    try:
+        latest = EnergyReading.objects.filter(meter__facility__organization=org).order_by('-timestamp').only('timestamp').first()
+        if latest and latest.timestamp and (now - latest.timestamp) > timedelta(days=2):
+            return latest.timestamp
+    except Exception:
+        pass
+    return now
 
 def _clean_id_filter(val):
     if not val:
@@ -24,7 +35,7 @@ def calculate_energy_summary(org, facility_id=None, date_range="7d", start_str=N
     """
     Computes summary KPIs with previous period comparison.
     """
-    start_dt, end_dt, comp_start_dt, comp_end_dt, comp_label = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, comp_start_dt, comp_end_dt, comp_label = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
 
     facilities = Facility.objects.filter(organization=org)
     fac_id_clean = _clean_id_filter(facility_id)
@@ -145,7 +156,7 @@ def get_timeseries_analytics(org, facility_id=None, meter_id=None, date_range="7
     """
     Returns time series load profile and telemetry trends.
     """
-    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
     agg_level = determine_aggregation(start_dt, end_dt, aggregation)
 
     facilities = Facility.objects.filter(organization=org)
@@ -224,7 +235,7 @@ def get_demand_analytics(org, facility_id=None, meter_id=None, date_range="7d", 
     """
     Computes peak demand, historical peak, peak timestamp, average demand, and demand profile.
     """
-    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
 
     facilities = Facility.objects.filter(organization=org)
     fac_id_clean = _clean_id_filter(facility_id)
@@ -278,7 +289,7 @@ def get_facility_comparison(org, date_range="7d", start_str=None, end_str=None):
     """
     Returns comparative measurements across all organization facilities.
     """
-    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
 
     facilities = Facility.objects.filter(organization=org)
     comparison = []
@@ -324,7 +335,7 @@ def get_source_breakdown(org, facility_id=None, date_range="7d", start_str=None,
     """
     Computes absolute kWh and percentage breakdown by energy source.
     """
-    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
 
     facilities = Facility.objects.filter(organization=org)
     fac_id_clean = _clean_id_filter(facility_id)
@@ -362,7 +373,7 @@ def get_energy_intensity(org, date_range="7d", start_str=None, end_str=None):
     Calculates building energy intensity (kWh / sq ft or kWh / sq m) per facility and organization average.
     If building square footage is missing, displays 'Energy intensity unavailable'.
     """
-    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
     facilities = Facility.objects.filter(organization=org)
 
     results = []
@@ -402,7 +413,7 @@ def get_data_quality_report(org, facility_id=None, date_range="7d", start_str=No
     """
     Returns data quality statistics, quality score %, and suspect readings log.
     """
-    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone)
+    start_dt, end_dt, _, _, _ = parse_date_range(date_range, start_str, end_str, org.timezone, _get_org_anchor(org))
 
     facilities = Facility.objects.filter(organization=org)
     fac_id_clean = _clean_id_filter(facility_id)

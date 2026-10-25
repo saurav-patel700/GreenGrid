@@ -1,15 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   CreditCard, FileText, CheckCircle2, AlertCircle, RefreshCw, Upload,
-  TrendingUp, Layers, Zap, IndianRupee, Calculator, Download, Plus, Filter,
-  Search, ShieldAlert, ArrowRightLeft, Clock, BarChart3, AlertTriangle, Eye, Trash2
+  TrendingUp, Layers, Zap, IndianRupee, Download, Plus,
+  Search, ArrowRightLeft, BarChart3, Eye
 } from 'lucide-react';
 import Breadcrumbs from '../../components/common/Breadcrumbs';
 import StatusBadge from '../../components/common/StatusBadge';
 import {
-  fetchBillsApi, createBillApi, calculateBillApi, reconcileBillApi, uploadBillDocumentApi,
-  fetchTariffsApi, createTariffApi, updateTariffApi, createTouPeriodApi, deleteTouPeriodApi,
-  createDemandRuleApi, fetchBillingSummaryApi, fetchBillingCostTimeseriesApi,
+  fetchBillsApi, createBillApi, reconcileBillApi, uploadBillDocumentApi,
+  fetchTariffsApi, createTariffApi, createTouPeriodApi,
+  fetchBillingSummaryApi,
   fetchBillingCostByFacilityApi, fetchBillingCostByMeterApi, fetchBillingTouBreakdownApi,
   fetchBillingDemandCostApi, fetchBillingVarianceApi, runTariffScenarioApi,
   getBillingExportUrl, fetchFacilities
@@ -46,7 +46,6 @@ export default function BillingPage() {
   const [showCreateBillModal, setShowCreateBillModal] = useState(false);
   const [showCreateTariffModal, setShowCreateTariffModal] = useState(false);
   const [showAddTouModal, setShowAddTouModal] = useState(false);
-  const [showUploadDocModal, setShowUploadDocModal] = useState(false);
   const [selectedDocFile, setSelectedDocFile] = useState(null);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [ocrResult, setOcrResult] = useState(null);
@@ -99,11 +98,7 @@ export default function BillingPage() {
   const [scenarioResult, setScenarioResult] = useState(null);
   const [scenarioLoading, setScenarioLoading] = useState(false);
 
-  useEffect(() => {
-    loadInitialData();
-  }, [selectedFacility]);
-
-  async function loadInitialData() {
+  const loadInitialData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -128,7 +123,11 @@ export default function BillingPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [selectedFacility, billForm.facility]);
+
+  useEffect(() => {
+    loadInitialData();
+  }, [loadInitialData]);
 
   async function handleLoadAnalytics() {
     try {
@@ -467,7 +466,7 @@ export default function BillingPage() {
                 <div className="card" style={{ padding: '3rem', textAlign: 'center', color: 'var(--color-text-muted)' }}>
                   <FileText size={36} style={{ marginBottom: '0.5rem', opacity: 0.5 }} />
                   <p style={{ fontWeight: 600 }}>No billing data available for this period.</p>
-                  <p style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>Enter a utility invoice or click "Generate Demo Data" in management commands.</p>
+                  <p style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>Upload or enter a utility invoice to get started.</p>
                 </div>
               ) : (
                 <div className="table-container">
@@ -823,6 +822,21 @@ export default function BillingPage() {
                     </tbody>
                   </table>
                 </div>
+
+                {touBreakdown && Object.keys(touBreakdown).length > 0 && (
+                  <div className="card" style={{ padding: '1.5rem', gridColumn: '1 / -1' }}>
+                    <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '1rem' }}>Time of Use (TOU) Consumption Breakdown</h4>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+                      {Object.entries(touBreakdown).map(([period, data]) => (
+                        <div key={period} style={{ padding: '1rem', background: 'var(--color-bg-subtle, rgba(255,255,255,0.03))', borderRadius: '8px', border: '1px solid var(--color-border-subtle, rgba(255,255,255,0.06))' }}>
+                          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--color-text-muted)', fontWeight: 600 }}>{period}</span>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 700, margin: '0.5rem 0' }}>{Number(data.kwh || data).toLocaleString()} kWh</div>
+                          {data.cost && <div style={{ fontSize: '0.875rem', color: 'var(--color-brand-primary, #00C853)' }}>₹{Number(data.cost).toLocaleString()}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

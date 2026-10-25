@@ -55,14 +55,18 @@ def validate_control_command(command_type, requested_value, device, user):
     """
     org = device.organization
 
-    # 1. Global Emergency Stop check
+    # 1. Tenant boundary check
+    profile = getattr(user, 'profile', None)
+    if not profile or profile.organization != org:
+        return False, "Unauthorized: User does not belong to the device organization.", "CROSS_TENANT_UNAUTHORIZED"
+
+    # 2. Global Emergency Stop check
     auto_config = get_or_create_automation_config(org)
     if not auto_config.automation_enabled:
         return False, "Global automation is currently DISABLED (Emergency Stop Active).", "GLOBAL_DISABLED"
 
-    # 2. RBAC check: Only admin or facility_manager can initiate control commands
-    profile = getattr(user, 'profile', None)
-    if not profile or profile.role not in ['admin', 'facility_manager']:
+    # 3. RBAC check: Only admin or facility_manager can initiate control commands
+    if profile.role not in ['admin', 'facility_manager']:
         return False, "Unauthorized: User role does not possess device control privileges.", "UNAUTHORIZED_ROLE"
 
     # 3. Safety Limit Boundaries Check
@@ -148,11 +152,17 @@ def approve_and_execute_command(command_id, user):
     """
     Approves and executes a queued control command.
     """
-    cmd = ControlCommand.objects.get(id=command_id)
+    if hasattr(command_id, 'id'):
+        cmd = command_id
+    else:
+        cmd = ControlCommand.objects.get(id=command_id)
 
     profile = getattr(user, 'profile', None)
     if not profile or profile.role not in ['admin', 'facility_manager']:
         raise PermissionError("User role does not possess command approval authorization.")
+
+    if profile.organization != cmd.organization:
+        raise PermissionError("User belongs to a different organization than the command target.")
 
     # Re-validate before execution
     is_valid, reason, _ = validate_control_command(cmd.command_type, cmd.requested_value, cmd.device, user)

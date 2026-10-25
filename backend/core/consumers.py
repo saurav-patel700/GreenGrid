@@ -5,6 +5,8 @@ from django.contrib.auth.models import User
 from rest_framework_simplejwt.tokens import AccessToken
 from core.models import UserProfile
 
+from urllib.parse import parse_qs
+
 class OrgConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         self.org_id = self.scope['url_route']['kwargs'].get('org_id')
@@ -12,8 +14,9 @@ class OrgConsumer(AsyncJsonWebsocketConsumer):
 
         # Authenticate token from query string ?token=<jwt_access_token>
         query_string = self.scope.get('query_string', b'').decode('utf-8')
-        params = dict(param.split('=') for param in query_string.split('&') if '=' in param)
-        token_str = params.get('token')
+        params = parse_qs(query_string)
+        token_list = params.get('token', [])
+        token_str = token_list[0] if token_list else None
 
         user = await self.get_user_from_token(token_str)
         if not user or not user.is_active:

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import {
-  getAccessToken, getMeApi, loginApi, registerApi, logoutApi,
+  getAccessToken, getMeApi, loginApi, loginWithGoogleApi, registerApi, logoutApi,
   updateProfileApi, changePasswordApi, fetchOrganizationApi, clearTokens
 } from '../services/api';
 
@@ -34,6 +34,23 @@ export function AuthProvider({ children }) {
     setLoading(true);
     try {
       const data = await loginApi(email, password);
+      setUser(data.user);
+      setOrganization(data.organization);
+      return data;
+    } catch (err) {
+      setUser(null);
+      setOrganization(null);
+      clearTokens();
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loginWithGoogle = async (credential, organizationName = null, invitationToken = null, autoProvision = true) => {
+    setLoading(true);
+    try {
+      const data = await loginWithGoogleApi(credential, organizationName, invitationToken, autoProvision);
       setUser(data.user);
       setOrganization(data.organization);
       return data;
@@ -94,6 +111,7 @@ export function AuthProvider({ children }) {
       isAuthenticated,
       loading,
       login,
+      loginWithGoogle,
       register,
       logout,
       updateProfile,

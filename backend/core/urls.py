@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
-    register_user, login_user, logout_user, get_current_user,
+    register_user, login_user, google_login, logout_user, get_current_user,
     update_profile, change_password, forgot_password, reset_password,
     users_list, invite_user, get_invitation_details, accept_invitation,
     update_user_role, disable_user, enable_user,
@@ -58,6 +58,7 @@ urlpatterns = [
     # Auth Endpoints
     path('auth/register/', register_user, name='auth-register'),
     path('auth/login/', login_user, name='auth-login'),
+    path('auth/google/', google_login, name='auth-google'),
     path('auth/logout/', logout_user, name='auth-logout'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('auth/me/', get_current_user, name='auth-me'),

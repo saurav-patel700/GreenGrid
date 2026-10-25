@@ -8,14 +8,18 @@ from decimal import Decimal
 from django.contrib.auth.models import User
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import transaction
-from django.db.models import Q, Sum, Avg, Max, Min
+from django.db.models import Q, Sum, Avg, Max, Min, Count
 from django.http import HttpResponse
 from django.utils import timezone
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import api_view, permission_classes, authentication_classes, action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+from django.conf import settings
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
+import requests as http_requests
 
 from .models import (
     Organization, UserProfile, Facility, FacilityAccess, Meter,
@@ -202,6 +206,269 @@ def login_user(request):
     })
 
 
+def verify_google_id_token(token_str):
+    """
+    Cryptographically verifies a Google ID token JWT on the server using Google's public keys.
+    Validates signature, issuer, audience, and expiration.
+    Returns verified payload dict.
+    """
+    if not token_str or not isinstance(token_str, str):
+        raise ValueError("Google credential token is missing or malformed.")
+
+    client_id = getattr(settings, 'GOOGLE_CLIENT_ID', '') or None
+
+    try:
+        request_adapter = google_requests.Request()
+        id_info = google_id_token.verify_oauth2_token(
+            token_str,
+            request_adapter,
+            audience=client_id
+        )
+    except Exception as err:
+        # Fallback to Google tokeninfo endpoint if needed
+        try:
+            resp = http_requests.get(
+                'https://oauth2.googleapis.com/tokeninfo',
+                params={'id_token': token_str},
+                timeout=5
+            )
+            if resp.status_code == 200:
+                id_info = resp.json()
+                if client_id and id_info.get('aud') != client_id:
+                    raise ValueError("Token audience does not match configured Google Client ID.")
+            else:
+                raise ValueError(f"Google token verification failed: {str(err)}")
+        except Exception:
+            raise ValueError(f"Google token verification failed: {str(err)}")
+
+    issuer = id_info.get('iss')
+    if issuer not in ['accounts.google.com', 'https://accounts.google.com']:
+        raise ValueError(f"Invalid token issuer: '{issuer}'.")
+
+    return id_info
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@authentication_classes([])
+def google_login(request):
+    """
+    POST /api/auth/google/
+    Authenticates a user via verified Google OAuth ID Token (JWT).
+    Issues application JWT tokens, maps user identity securely, preserves multi-tenant RBAC.
+    """
+    credential = request.data.get('credential')
+    if not credential:
+        return Response({'error': 'Google credential token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        id_info = verify_google_id_token(credential)
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+    except Exception as e:
+        return Response({'error': f'Failed to verify Google identity: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+    email = id_info.get('email', '').strip().lower()
+    email_verified = id_info.get('email_verified', False)
+    if str(email_verified).lower() not in ('true', '1'):
+        return Response({'error': 'Unverified Google email address. Please verify your email with Google.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not email:
+        return Response({'error': 'Google profile did not contain an email address.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    sub = str(id_info.get('sub', '')).strip()
+    if not sub:
+        return Response({'error': 'Google profile did not contain a subject identifier.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    first_name = id_info.get('given_name') or ''
+    last_name = id_info.get('family_name') or ''
+    picture = id_info.get('picture') or ''
+
+    # Check if user already exists (by google_sub or email)
+    user = User.objects.filter(Q(profile__google_sub=sub) | Q(email__iexact=email) | Q(username__iexact=email)).first()
+
+    if user:
+        if not user.is_active:
+            return Response(
+                {'error': 'This user account has been disabled. Please contact your organization administrator.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        profile = getattr(user, 'profile', None)
+        if profile:
+            # Safe account linking check: if profile already has a google_sub, verify it matches
+            if profile.google_sub and profile.google_sub != sub:
+                return Response(
+                    {'error': 'Account linking conflict: This account is already linked to a different Google identity.'},
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            # Link Google sub if not set
+            fields_to_update = []
+            if not profile.google_sub:
+                profile.google_sub = sub
+                fields_to_update.append('google_sub')
+            if picture and not profile.picture:
+                profile.picture = picture
+                fields_to_update.append('picture')
+            if fields_to_update:
+                profile.save(update_fields=fields_to_update)
+        else:
+            org = Organization.objects.first()
+            if not org:
+                org = Organization.objects.create(name="Default Organization", code="DEFAULT-ORG")
+            profile = UserProfile.objects.create(
+                user=user,
+                organization=org,
+                role='viewer',
+                department='General Operations',
+                google_sub=sub,
+                picture=picture
+            )
+
+        user.last_login = timezone.now()
+        user.save(update_fields=['last_login'])
+
+        refresh = RefreshToken.for_user(user)
+
+        if profile and profile.organization:
+            create_audit_log(profile.organization, user, 'google_login', 'User', user.id, {'email': email, 'google_sub': sub}, request)
+
+        return Response({
+            'message': 'Google authentication successful.',
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': UserProfileSerializer(profile).data,
+            'organization': OrganizationSerializer(profile.organization).data
+        }, status=status.HTTP_200_OK)
+
+    # 1. Check for valid pending organization invitation
+    invitation_token = request.data.get('invitation_token')
+    invitation = None
+    if invitation_token:
+        invitation = Invitation.objects.filter(token=invitation_token).first()
+    if not invitation:
+        invitation = Invitation.objects.filter(email__iexact=email).order_by('-created_at').first()
+
+    if invitation and invitation.is_valid():
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                first_name=first_name,
+                last_name=last_name
+            )
+            user.set_unusable_password()
+            user.save()
+
+            profile = UserProfile.objects.create(
+                user=user,
+                organization=invitation.organization,
+                role=invitation.role,
+                department='Operations',
+                google_sub=sub,
+                picture=picture
+            )
+
+            for fac in invitation.facilities.all():
+                FacilityAccess.objects.get_or_create(user=user, facility=fac)
+
+            invitation.is_accepted = True
+            invitation.save(update_fields=['is_accepted'])
+
+            user.last_login = timezone.now()
+            user.save(update_fields=['last_login'])
+
+            create_audit_log(invitation.organization, user, 'invitation_accepted_google', 'Invitation', invitation.id, {'email': email, 'google_sub': sub}, request)
+
+            refresh = RefreshToken.for_user(user)
+
+            return Response({
+                'message': 'Invitation accepted via Google authentication.',
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': UserProfileSerializer(profile).data,
+                'organization': OrganizationSerializer(invitation.organization).data
+            }, status=status.HTTP_201_CREATED)
+
+    # 2. Check if user is registering an organization or auto-provisioning
+    organization_name = request.data.get('organization_name', '').strip()
+    auto_provision = request.data.get('auto_provision', False)
+
+    if organization_name or auto_provision:
+        with transaction.atomic():
+            org = None
+            if organization_name:
+                org = Organization.objects.filter(name__iexact=organization_name).first()
+            if not org and auto_provision:
+                org = Organization.objects.first()
+
+            if not org:
+                target_org_name = organization_name or f"{first_name or email.split('@')[0].capitalize()}'s Enterprise"
+                base_code = target_org_name.upper().replace(' ', '-')[:20]
+                code = f"{base_code}-{uuid.uuid4().hex[:4].upper()}"
+
+                org = Organization.objects.create(
+                    name=target_org_name,
+                    code=code
+                )
+
+                facility = Facility.objects.create(
+                    organization=org,
+                    name=f"{target_org_name} Primary Facility",
+                    facility_type='commercial',
+                    address='100 Corporate Way',
+                    city='Austin',
+                    state='TX',
+                    square_footage=75000,
+                    baseline_kwh_sqft=14.00
+                )
+            else:
+                facility = org.facilities.first()
+
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                first_name=first_name,
+                last_name=last_name
+            )
+            user.set_unusable_password()
+            user.save()
+
+            profile = UserProfile.objects.create(
+                user=user,
+                organization=org,
+                role='admin',
+                department='Executive / Operations',
+                google_sub=sub,
+                picture=picture
+            )
+
+            for fac in org.facilities.all():
+                FacilityAccess.objects.get_or_create(user=user, facility=fac)
+
+            user.last_login = timezone.now()
+            user.save(update_fields=['last_login'])
+
+            create_audit_log(org, user, 'organization_registered_google', 'Organization', org.id, {'email': email, 'google_sub': sub}, request)
+
+            refresh = RefreshToken.for_user(user)
+
+            return Response({
+                'message': 'Google authentication successful.',
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': UserProfileSerializer(profile).data,
+                'organization': OrganizationSerializer(org).data
+            }, status=status.HTTP_201_CREATED)
+
+    # 3. New user without organization or invitation -> Reject safely
+    return Response({
+        'error': 'No GreenGrid organization account found for this Google email. Please register your organization or request an invitation from your administrator.',
+        'code': 'UNAUTHORIZED_ORGANIZATION'
+    }, status=status.HTTP_403_FORBIDDEN)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout_user(request):
@@ -365,15 +632,18 @@ class MultiTenantModelViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        model_name = self.queryset.model.__name__
+        qs = self.queryset.none()
 
         if hasattr(self.queryset.model, 'organization'):
-            return self.queryset.filter(organization=org)
+            qs = self.queryset.filter(organization=org)
         elif hasattr(self.queryset.model, 'facility'):
-            return self.queryset.filter(facility__organization=org)
+            qs = self.queryset.filter(facility__organization=org)
         elif hasattr(self.queryset.model, 'meter'):
-            return self.queryset.filter(meter__facility__organization=org)
-        return self.queryset.none()
+            qs = self.queryset.filter(meter__facility__organization=org)
+
+        if not qs.ordered:
+            qs = qs.order_by('-id')
+        return qs
 
 class FacilityViewSet(MultiTenantModelViewSet):
     queryset = Facility.objects.all()
@@ -386,6 +656,18 @@ class FacilityViewSet(MultiTenantModelViewSet):
         facility = serializer.save(organization=self.request.user.profile.organization)
         create_audit_log(self.request.user.profile.organization, self.request.user, 'facility_created', 'Facility', facility.id, {'name': facility.name}, self.request)
 
+    def perform_update(self, serializer):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can update facilities.")
+        facility = serializer.save(organization=self.request.user.profile.organization)
+        create_audit_log(self.request.user.profile.organization, self.request.user, 'facility_updated', 'Facility', facility.id, {'name': facility.name}, self.request)
+
+    def perform_destroy(self, instance):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can delete facilities.")
+        create_audit_log(self.request.user.profile.organization, self.request.user, 'facility_deleted', 'Facility', instance.id, {'name': instance.name}, self.request)
+        super().perform_destroy(instance)
+
 class MeterViewSet(MultiTenantModelViewSet):
     queryset = Meter.objects.all()
     serializer_class = MeterSerializer
@@ -394,23 +676,82 @@ class MeterViewSet(MultiTenantModelViewSet):
     def perform_create(self, serializer):
         if self.request.user.profile.role not in ['admin', 'facility_manager']:
             self.permission_denied(self.request, message="Only Admins and Facility Managers can provision meters.")
+        facility = serializer.validated_data.get('facility')
+        org = self.request.user.profile.organization
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
         meter = serializer.save()
-        create_audit_log(self.request.user.profile.organization, self.request.user, 'meter_created', 'Meter', meter.id, {'name': meter.name}, self.request)
+        create_audit_log(org, self.request.user, 'meter_created', 'Meter', meter.id, {'name': meter.name}, self.request)
+
+    def perform_update(self, serializer):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can update meters.")
+        facility = serializer.validated_data.get('facility')
+        org = self.request.user.profile.organization
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        meter = serializer.save()
+        create_audit_log(org, self.request.user, 'meter_updated', 'Meter', meter.id, {'name': meter.name}, self.request)
+
+    def perform_destroy(self, instance):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can delete meters.")
+        create_audit_log(self.request.user.profile.organization, self.request.user, 'meter_deleted', 'Meter', instance.id, {'name': instance.name}, self.request)
+        super().perform_destroy(instance)
 
 class EnergyReadingViewSet(MultiTenantModelViewSet):
     queryset = EnergyReading.objects.all()
     serializer_class = EnergyReadingSerializer
     permission_classes = [IsAuthenticated, IsOrgAnalystOrAbove]
 
-class UtilityBillViewSet(MultiTenantModelViewSet):
-    queryset = UtilityBill.objects.all()
-    serializer_class = UtilityBillSerializer
-    permission_classes = [IsAuthenticated, IsOrgAnalystOrAbove]
+    def perform_create(self, serializer):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can record energy readings manually.")
+        meter = serializer.validated_data.get('meter')
+        org = self.request.user.profile.organization
+        if meter and meter.facility.organization != org:
+            raise serializers.ValidationError({"meter": "Meter does not belong to your organization."})
+        serializer.save()
+
+    def perform_update(self, serializer):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can update energy readings.")
+        meter = serializer.validated_data.get('meter')
+        org = self.request.user.profile.organization
+        if meter and meter.facility.organization != org:
+            raise serializers.ValidationError({"meter": "Meter does not belong to your organization."})
+        serializer.save()
 
 class RenewableAssetViewSet(MultiTenantModelViewSet):
     queryset = RenewableAsset.objects.all()
     serializer_class = RenewableAssetSerializer
     permission_classes = [IsAuthenticated, IsOrgAnalystOrAbove]
+
+    def perform_create(self, serializer):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can configure renewable assets.")
+        facility = serializer.validated_data.get('facility')
+        org = self.request.user.profile.organization
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        asset = serializer.save()
+        create_audit_log(org, self.request.user, 'renewable_asset_created', 'RenewableAsset', asset.id, {'name': asset.name}, self.request)
+
+    def perform_update(self, serializer):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can update renewable assets.")
+        facility = serializer.validated_data.get('facility')
+        org = self.request.user.profile.organization
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        asset = serializer.save()
+        create_audit_log(org, self.request.user, 'renewable_asset_updated', 'RenewableAsset', asset.id, {'name': asset.name}, self.request)
+
+    def perform_destroy(self, instance):
+        if self.request.user.profile.role not in ['admin', 'facility_manager']:
+            self.permission_denied(self.request, message="Only Admins and Facility Managers can remove renewable assets.")
+        create_audit_log(self.request.user.profile.organization, self.request.user, 'renewable_asset_deleted', 'RenewableAsset', instance.id, {'name': instance.name}, self.request)
+        super().perform_destroy(instance)
 
 class AlertViewSet(MultiTenantModelViewSet):
     queryset = Alert.objects.all()
@@ -572,10 +913,16 @@ def accept_invitation(request):
     if not token or not password:
         return Response({'error': 'Token and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+    if len(password) < 8:
+        return Response({'error': 'Password must be at least 8 characters long.'}, status=status.HTTP_400_BAD_REQUEST)
+
     try:
         invitation = Invitation.objects.get(token=token)
         if not invitation.is_valid():
             return Response({'error': 'This invitation has expired or has already been accepted.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if User.objects.filter(Q(username=invitation.email) | Q(email=invitation.email)).exists():
+            return Response({'error': 'A user account with this email address already exists. Please sign in.'}, status=status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
             name_parts = full_name.split(' ', 1)
@@ -846,10 +1193,26 @@ def energy_by_meter_view(request):
     today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
     meters_data = []
 
+    # Batch compute today's consumption across all meters in 1 query
+    today_consumptions = dict(
+        EnergyReading.objects.filter(
+            meter__in=meters_qs,
+            timestamp__gte=today_start
+        ).values('meter_id').annotate(s=Sum('consumption')).values_list('meter_id', 's')
+    )
+
+    # Batch compute latest reading per meter in 2 queries
+    latest_reading_ids = list(
+        EnergyReading.objects.filter(meter__in=meters_qs)
+        .values('meter_id')
+        .annotate(max_id=Max('id'))
+        .values_list('max_id', flat=True)
+    )
+    latest_readings = {r.meter_id: r for r in EnergyReading.objects.filter(id__in=latest_reading_ids)}
+
     for m in meters_qs:
-        readings = EnergyReading.objects.filter(meter=m)
-        latest_reading = readings.first()
-        today_kwh = float(readings.filter(timestamp__gte=today_start).aggregate(s=Sum('consumption'))['s'] or 0.0)
+        latest_reading = latest_readings.get(m.id)
+        today_kwh = float(today_consumptions.get(m.id) or 0.0)
 
         meters_data.append({
             "id": m.id,
@@ -1081,7 +1444,7 @@ def authenticate_ingestion_request(request):
             try:
                 cred = IntegrationCredential.objects.get(key_id=key_id, status='active')
                 hashed = hashlib.sha256(secret.encode('utf-8')).hexdigest()
-                if cred.hashed_secret == hashed:
+                if secrets.compare_digest(cred.hashed_secret, hashed):
                     cred.last_used_at = timezone.now()
                     cred.save(update_fields=['last_used_at'])
                     return cred.organization, None
@@ -1241,7 +1604,10 @@ class TariffPlanViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        return TariffPlan.objects.filter(organization=org)
+        qs = TariffPlan.objects.filter(organization=org)
+        if not qs.ordered:
+            qs = qs.order_by('-id')
+        return qs
 
     def perform_create(self, serializer):
         org = self.request.user.profile.organization
@@ -1250,14 +1616,14 @@ class TariffPlanViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         org = self.request.user.profile.organization
-        tariff = serializer.save()
+        tariff = serializer.save(organization=org)
         create_audit_log(org, self.request.user, 'tariff_plan_updated', 'TariffPlan', tariff.id, {'name': tariff.name}, self.request)
 
     @action(detail=True, methods=['get', 'post'], url_path='tou-periods')
     def tou_periods(self, request, pk=None):
         tariff = self.get_object()
         if request.method == 'GET':
-            periods = tariff.tou_periods.all()
+            periods = tariff.tou_periods.all().order_by('id')
             return Response(TariffTimePeriodSerializer(periods, many=True).data)
         elif request.method == 'POST':
             if request.user.profile.role not in ['admin', 'facility_manager']:
@@ -1277,7 +1643,26 @@ class TariffTimePeriodViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        return TariffTimePeriod.objects.filter(tariff_plan__organization=org)
+        qs = TariffTimePeriod.objects.filter(tariff_plan__organization=org)
+        if not qs.ordered:
+            qs = qs.order_by('id')
+        return qs
+
+    def perform_create(self, serializer):
+        org = self.request.user.profile.organization
+        tariff_plan = serializer.validated_data.get('tariff_plan')
+        if tariff_plan and tariff_plan.organization != org:
+            raise serializers.ValidationError({"tariff_plan": "Tariff plan does not belong to your organization."})
+        period = serializer.save()
+        create_audit_log(org, self.request.user, 'tou_period_created', 'TariffTimePeriod', period.id, {'name': period.name}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        tariff_plan = serializer.validated_data.get('tariff_plan')
+        if tariff_plan and tariff_plan.organization != org:
+            raise serializers.ValidationError({"tariff_plan": "Tariff plan does not belong to your organization."})
+        period = serializer.save()
+        create_audit_log(org, self.request.user, 'tou_period_updated', 'TariffTimePeriod', period.id, {'name': period.name}, self.request)
 
 
 class DemandChargeRuleViewSet(viewsets.ModelViewSet):
@@ -1286,7 +1671,26 @@ class DemandChargeRuleViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        return DemandChargeRule.objects.filter(tariff_plan__organization=org)
+        qs = DemandChargeRule.objects.filter(tariff_plan__organization=org)
+        if not qs.ordered:
+            qs = qs.order_by('id')
+        return qs
+
+    def perform_create(self, serializer):
+        org = self.request.user.profile.organization
+        tariff_plan = serializer.validated_data.get('tariff_plan')
+        if tariff_plan and tariff_plan.organization != org:
+            raise serializers.ValidationError({"tariff_plan": "Tariff plan does not belong to your organization."})
+        rule = serializer.save()
+        create_audit_log(org, self.request.user, 'demand_rule_created', 'DemandChargeRule', rule.id, {'name': rule.rule_name}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        tariff_plan = serializer.validated_data.get('tariff_plan')
+        if tariff_plan and tariff_plan.organization != org:
+            raise serializers.ValidationError({"tariff_plan": "Tariff plan does not belong to your organization."})
+        rule = serializer.save()
+        create_audit_log(org, self.request.user, 'demand_rule_updated', 'DemandChargeRule', rule.id, {'name': rule.rule_name}, self.request)
 
 
 # ----------------------------------------------------------------------
@@ -1309,6 +1713,8 @@ class UtilityBillViewSet(viewsets.ModelViewSet):
         if rec_status:
             qs = qs.filter(reconciliation_status=rec_status)
 
+        if not qs.ordered:
+            qs = qs.order_by('-billing_period_end', '-id')
         return qs
 
     def perform_create(self, serializer):
@@ -1322,6 +1728,16 @@ class UtilityBillViewSet(viewsets.ModelViewSet):
         # Auto calculate & reconcile if requested or baseline created
         reconcile_utility_bill(bill, user=self.request.user)
         create_audit_log(org, self.request.user, 'utility_bill_created', 'UtilityBill', bill.id, {'invoice_number': bill.invoice_number}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+
+        bill = serializer.save(organization=org)
+        reconcile_utility_bill(bill, user=self.request.user)
+        create_audit_log(org, self.request.user, 'utility_bill_updated', 'UtilityBill', bill.id, {'invoice_number': bill.invoice_number}, self.request)
 
     @action(detail=True, methods=['post'], url_path='calculate')
     def calculate_bill(self, request, pk=None):
@@ -1765,12 +2181,25 @@ class DemandResponseEventViewSet(viewsets.ModelViewSet):
         dr_status = self.request.query_params.get('status')
         if dr_status:
             qs = qs.filter(status=dr_status)
+        if not qs.ordered:
+            qs = qs.order_by('-start_time', '-id')
         return qs
 
     def perform_create(self, serializer):
         org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
         event = serializer.save(organization=org, created_by=self.request.user)
         create_audit_log(org, self.request.user, 'dr_event_created', 'DemandResponseEvent', event.id, {'event_name': event.event_name}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        event = serializer.save()
+        create_audit_log(org, self.request.user, 'dr_event_updated', 'DemandResponseEvent', event.id, {'event_name': event.event_name}, self.request)
 
     @action(detail=True, methods=['post'], url_path='approve')
     def approve_event(self, request, pk=None):
@@ -1810,12 +2239,25 @@ class DeviceViewSet(viewsets.ModelViewSet):
         protocol = self.request.query_params.get('protocol')
         if protocol:
             qs = qs.filter(protocol=protocol)
+        if not qs.ordered:
+            qs = qs.order_by('-id')
         return qs
 
     def perform_create(self, serializer):
         org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
         device = serializer.save(organization=org)
         create_audit_log(org, self.request.user, 'device_registered', 'Device', device.id, {'name': device.name, 'serial': device.serial_number}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        device = serializer.save()
+        create_audit_log(org, self.request.user, 'device_updated', 'Device', device.id, {'name': device.name, 'serial': device.serial_number}, self.request)
 
     @action(detail=True, methods=['get'], url_path='health')
     def health_check(self, request, pk=None):
@@ -1836,12 +2278,26 @@ class StorageAssetViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        return StorageAsset.objects.filter(facility__organization=org)
+        qs = StorageAsset.objects.filter(facility__organization=org)
+        if not qs.ordered:
+            qs = qs.order_by('-id')
+        return qs
 
     def perform_create(self, serializer):
         org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
         asset = serializer.save(organization=org)
         create_audit_log(org, self.request.user, 'storage_asset_created', 'StorageAsset', asset.id, {'name': asset.name}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        asset = serializer.save()
+        create_audit_log(org, self.request.user, 'storage_asset_updated', 'StorageAsset', asset.id, {'name': asset.name}, self.request)
 
 
 # ----------------------------------------------------------------------
@@ -1987,12 +2443,32 @@ class DeviceSafetyPolicyViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        return DeviceSafetyPolicy.objects.filter(organization=org)
+        qs = DeviceSafetyPolicy.objects.filter(organization=org)
+        if not qs.ordered:
+            qs = qs.order_by('-id')
+        return qs
 
     def perform_create(self, serializer):
         org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        device = serializer.validated_data.get('device')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        if device and device.organization != org:
+            raise serializers.ValidationError({"device": "Device does not belong to your organization."})
         policy = serializer.save(organization=org)
         create_audit_log(org, self.request.user, 'safety_policy_created', 'DeviceSafetyPolicy', policy.id, {}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        facility = serializer.validated_data.get('facility')
+        device = serializer.validated_data.get('device')
+        if facility and facility.organization != org:
+            raise serializers.ValidationError({"facility": "Facility does not belong to your organization."})
+        if device and device.organization != org:
+            raise serializers.ValidationError({"device": "Device does not belong to your organization."})
+        policy = serializer.save(organization=org)
+        create_audit_log(org, self.request.user, 'safety_policy_updated', 'DeviceSafetyPolicy', policy.id, {}, self.request)
 
 
 class ControlCommandViewSet(viewsets.ModelViewSet):
@@ -2195,7 +2671,7 @@ def operations_command_center_view(request):
     severity = request.query_params.get('severity')
     device_status = request.query_params.get('device_status')
 
-    facilities = Facility.objects.filter(organization=org)
+    facilities = Facility.objects.filter(organization=org).annotate(meters_count=Count('meters'))
     if facility_id and facility_id != 'all':
         facilities = facilities.filter(id=facility_id)
 
@@ -2239,7 +2715,7 @@ def operations_command_center_view(request):
         'name': f.name,
         'facility_type': f.facility_type,
         'status': f.status,
-        'meters_count': f.meters.count(),
+        'meters_count': getattr(f, 'meters_count', 0),
         'square_footage': f.square_footage
     } for f in facilities[:10]]
 
@@ -2313,7 +2789,20 @@ class AlertEscalationPolicyViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         org = self.request.user.profile.organization
-        return AlertEscalationPolicy.objects.filter(organization=org)
+        qs = AlertEscalationPolicy.objects.filter(organization=org)
+        if not qs.ordered:
+            qs = qs.order_by('id')
+        return qs
+
+    def perform_create(self, serializer):
+        org = self.request.user.profile.organization
+        policy = serializer.save(organization=org)
+        create_audit_log(org, self.request.user, 'alert_escalation_policy_created', 'AlertEscalationPolicy', policy.id, {'name': policy.name}, self.request)
+
+    def perform_update(self, serializer):
+        org = self.request.user.profile.organization
+        policy = serializer.save(organization=org)
+        create_audit_log(org, self.request.user, 'alert_escalation_policy_updated', 'AlertEscalationPolicy', policy.id, {'name': policy.name}, self.request)
 
 
 @api_view(['GET'])

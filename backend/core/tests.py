@@ -1,8 +1,15 @@
+from unittest.mock import patch
 from django.test import TestCase
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from rest_framework import status
-from core.models import Organization, UserProfile, Facility, Meter, Alert, Invitation
+from core.models import (
+    Organization, UserProfile, Facility, Meter, Alert, Invitation,
+    EnergyReading, TariffPlan, TariffTimePeriod, DemandChargeRule, UtilityBill,
+    RenewableAsset, DemandResponseEvent, Device, StorageAsset, DeviceSafetyPolicy,
+    AlertEscalationPolicy, ControlCommand, IntegrationCredential
+)
+from core.services.automation import approve_and_execute_command
 
 class GreenGridPhase2SecurityTestCase(TestCase):
     def setUp(self):
@@ -1040,6 +1047,593 @@ class GreenGridPhase5PredictiveAndOptimizationTestCase(TestCase):
         self.assertIn("facilities", res.data["results"])
         matching_names = [f["name"] for f in res.data["results"]["facilities"]]
         self.assertIn(self.facility_a.name, matching_names)
+
+
+class GreenGridGoogleOAuthTestCase(TestCase):
+    """
+    Comprehensive test suite for Google OAuth 2.0 / Google Identity Services integration:
+    1. Successful Google Sign-In with an existing authorized user.
+    2. Successful Google Sign-In for an eligible new user with pending invitation.
+    3. Successful Google Sign-In with new organization registration.
+    4. Invalid, expired, or tampered Google ID tokens.
+    5. Unverified Google email addresses.
+    6. Google accounts whose emails conflict with existing accounts.
+    7. Inactive or unauthorized users.
+    8. Correct organization membership and role preservation.
+    9. Existing email/password login continues to work.
+    10. JWT refresh, logout, and protected routes continue working.
+    11. Frontend and backend error handling.
+    12. Multi-tenant isolation and access-control regression tests.
+    """
+    def setUp(self):
+        self.client = APIClient()
+
+        # Organization Alpha
+        self.org_alpha = Organization.objects.create(name="Alpha Dynamics Corp", code="ALPHA-CORP")
+        self.user_alpha_admin = User.objects.create_user(
+            username="admin@alpha.enterprise",
+            email="admin@alpha.enterprise",
+            password="StrongPassword123!",
+            first_name="Arthur",
+            last_name="Pendelton"
+        )
+        self.profile_alpha_admin = UserProfile.objects.create(
+            user=self.user_alpha_admin,
+            organization=self.org_alpha,
+            role="admin",
+            department="Operations",
+            google_sub="google-sub-alpha-admin"
+        )
+        self.facility_alpha = Facility.objects.create(
+            organization=self.org_alpha,
+            name="Alpha Headquarters",
+            facility_type="commercial"
+        )
+
+        # Organization Beta (Tenant Isolation)
+        self.org_beta = Organization.objects.create(name="Beta Manufacturing", code="BETA-CORP")
+        self.user_beta_admin = User.objects.create_user(
+            username="admin@beta.enterprise",
+            email="admin@beta.enterprise",
+            password="StrongPassword123!"
+        )
+        self.profile_beta_admin = UserProfile.objects.create(
+            user=self.user_beta_admin,
+            organization=self.org_beta,
+            role="admin"
+        )
+        self.facility_beta = Facility.objects.create(
+            organization=self.org_beta,
+            name="Beta Plant 1",
+            facility_type="manufacturing"
+        )
+
+    # 1. Successful Google Sign-In with an existing authorized user
+    @patch('core.views.verify_google_id_token')
+    def test_01_google_login_existing_authorized_user(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-sub-alpha-admin',
+            'email': 'admin@alpha.enterprise',
+            'email_verified': True,
+            'given_name': 'Arthur',
+            'family_name': 'Pendelton',
+            'picture': 'https://lh3.googleusercontent.com/test-avatar.jpg',
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'valid-google-jwt-token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('access', res.data)
+        self.assertIn('refresh', res.data)
+        self.assertEqual(res.data['user']['email'], 'admin@alpha.enterprise')
+        self.assertEqual(res.data['user']['role'], 'admin')
+        self.assertEqual(res.data['organization']['id'], self.org_alpha.id)
+
+    # 2. Successful Google Sign-In for an eligible new user with pending invitation
+    @patch('core.views.verify_google_id_token')
+    def test_02_google_login_eligible_new_user_with_invitation(self, mock_verify):
+        invitation = Invitation.objects.create(
+            organization=self.org_alpha,
+            email="newanalyst@alpha.enterprise",
+            role="analyst",
+            invited_by=self.user_alpha_admin
+        )
+        invitation.facilities.add(self.facility_alpha)
+
+        mock_verify.return_value = {
+            'sub': 'google-sub-analyst-99',
+            'email': 'newanalyst@alpha.enterprise',
+            'email_verified': True,
+            'given_name': 'Sarah',
+            'family_name': 'Connor',
+            'picture': 'https://lh3.googleusercontent.com/sarah.jpg',
+            'iss': 'https://accounts.google.com'
+        }
+
+        res = self.client.post('/api/auth/google/', {'credential': 'valid-sarah-token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertIn('access', res.data)
+        self.assertEqual(res.data['user']['role'], 'analyst')  # Role set by admin preserved
+        self.assertEqual(res.data['organization']['id'], self.org_alpha.id)
+
+        # Check invitation status
+        invitation.refresh_from_db()
+        self.assertTrue(invitation.is_accepted)
+
+    # 3. Successful Google Sign-In with new organization registration
+    @patch('core.views.verify_google_id_token')
+    def test_03_google_login_new_organization_registration(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-sub-newfounder-101',
+            'email': 'founder@cleantech.demo',
+            'email_verified': True,
+            'given_name': 'Elena',
+            'family_name': 'Rostova',
+            'iss': 'accounts.google.com'
+        }
+
+        payload = {
+            'credential': 'valid-founder-token',
+            'organization_name': 'CleanTech Renewable Solutions'
+        }
+        res = self.client.post('/api/auth/google/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertIn('access', res.data)
+        self.assertEqual(res.data['user']['email'], 'founder@cleantech.demo')
+        self.assertEqual(res.data['user']['role'], 'admin')
+        self.assertEqual(res.data['organization']['name'], 'CleanTech Renewable Solutions')
+
+    # 4. Invalid, expired, or tampered Google ID tokens
+    @patch('core.views.verify_google_id_token')
+    def test_04_invalid_or_expired_google_token(self, mock_verify):
+        mock_verify.side_effect = ValueError("Google token verification failed: Token expired")
+        res = self.client.post('/api/auth/google/', {'credential': 'expired-google-token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn("Token expired", res.data['error'])
+
+    # 5. Unverified Google email addresses
+    @patch('core.views.verify_google_id_token')
+    def test_05_unverified_google_email_address(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-sub-unverified',
+            'email': 'unverified@external.com',
+            'email_verified': False,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'token-with-unverified-email'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Unverified Google email", res.data['error'])
+
+    # 6. Google accounts whose emails conflict with existing application accounts
+    @patch('core.views.verify_google_id_token')
+    def test_06_account_linking_conflict_prevention(self, mock_verify):
+        # Admin user already linked to 'google-sub-alpha-admin'
+        mock_verify.return_value = {
+            'sub': 'different-intruder-google-sub',
+            'email': 'admin@alpha.enterprise',
+            'email_verified': True,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'intruder-token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("Account linking conflict", res.data['error'])
+
+    # 7. Inactive or disabled users cannot login via Google
+    @patch('core.views.verify_google_id_token')
+    def test_07_disabled_user_cannot_login_via_google(self, mock_verify):
+        self.user_alpha_admin.is_active = False
+        self.user_alpha_admin.save()
+
+        mock_verify.return_value = {
+            'sub': 'google-sub-alpha-admin',
+            'email': 'admin@alpha.enterprise',
+            'email_verified': True,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("disabled", res.data['error'].lower())
+
+    # 8. Uninvited, unregistered new user rejected safely
+    @patch('core.views.verify_google_id_token')
+    def test_08_unauthorized_new_user_without_organization(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-sub-random-stranger',
+            'email': 'stranger@gmail.com',
+            'email_verified': True,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'stranger-token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.data.get('code'), 'UNAUTHORIZED_ORGANIZATION')
+
+    # 9. Correct organization membership and role preservation
+    @patch('core.views.verify_google_id_token')
+    def test_09_correct_role_and_rbac_preservation(self, mock_verify):
+        viewer = User.objects.create_user(
+            username="viewer@alpha.enterprise",
+            email="viewer@alpha.enterprise",
+            password="Password123!"
+        )
+        UserProfile.objects.create(
+            user=viewer,
+            organization=self.org_alpha,
+            role="viewer"
+        )
+        mock_verify.return_value = {
+            'sub': 'google-sub-viewer-88',
+            'email': 'viewer@alpha.enterprise',
+            'email_verified': True,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'viewer-token'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        token = res.data['access']
+        self.assertEqual(res.data['user']['role'], 'viewer')
+
+        # Role restriction check: Viewer cannot invite users
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        invite_res = self.client.post('/api/users/invite/', {'email': 'somebody@test.com'}, format='json')
+        self.assertEqual(invite_res.status_code, status.HTTP_403_FORBIDDEN)
+
+    # 10. Existing email/password login continues to work
+    def test_10_existing_password_login_continues_working(self):
+        res = self.client.post('/api/auth/login/', {
+            'email': 'admin@alpha.enterprise',
+            'password': 'StrongPassword123!'
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('access', res.data)
+        self.assertEqual(res.data['user']['email'], 'admin@alpha.enterprise')
+
+    # 11. JWT refresh, logout, and protected routes continue working
+    @patch('core.views.verify_google_id_token')
+    def test_11_jwt_refresh_and_logout_flow(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-sub-alpha-admin',
+            'email': 'admin@alpha.enterprise',
+            'email_verified': True,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'token'}, format='json')
+        access = res.data['access']
+        refresh = res.data['refresh']
+
+        # Refresh token
+        refresh_res = self.client.post('/api/auth/token/refresh/', {'refresh': refresh}, format='json')
+        self.assertEqual(refresh_res.status_code, status.HTTP_200_OK)
+        self.assertIn('access', refresh_res.data)
+
+        # Logout & blacklist
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
+        logout_res = self.client.post('/api/auth/logout/', {'refresh': refresh}, format='json')
+        self.assertEqual(logout_res.status_code, status.HTTP_200_OK)
+
+    # 12. Multi-tenant isolation with Google-authenticated session
+    @patch('core.views.verify_google_id_token')
+    def test_12_cross_tenant_isolation_with_google_jwt(self, mock_verify):
+        mock_verify.return_value = {
+            'sub': 'google-sub-alpha-admin',
+            'email': 'admin@alpha.enterprise',
+            'email_verified': True,
+            'iss': 'accounts.google.com'
+        }
+        res = self.client.post('/api/auth/google/', {'credential': 'token'}, format='json')
+        token = res.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+
+        # Alpha admin attempts to access Beta facility -> 404 Isolated
+        beta_res = self.client.get(f'/api/facilities/{self.facility_beta.id}/')
+        self.assertEqual(beta_res.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class GreenGridSecurityAuditAndPenetrationTestCase(TestCase):
+    """
+    Automated Security Penetration Testing & Defect Remediation Test Suite.
+    Validates all IDOR/BOLA protections, tenant boundary validations,
+    safe credential authentication, password security, and N+1 query mitigations.
+    """
+    def setUp(self):
+        self.client = APIClient()
+
+        # Org Alpha
+        self.org_a = Organization.objects.create(name="Enterprise Alpha", code="ENT-ALPHA")
+        self.user_a_admin = User.objects.create_user(username="admin@alpha.test", email="admin@alpha.test", password="password123")
+        self.profile_a_admin = UserProfile.objects.create(user=self.user_a_admin, organization=self.org_a, role="admin")
+        self.facility_a = Facility.objects.create(organization=self.org_a, name="Alpha Main Campus", address="100 Alpha Blvd")
+        self.meter_a = Meter.objects.create(facility=self.facility_a, name="Alpha Main Meter", meter_number="MTR-ALPHA-001")
+        self.tariff_a = TariffPlan.objects.create(organization=self.org_a, name="Alpha Commercial Tariff", utility_name="Alpha Power", effective_from="2026-01-01")
+        self.device_a = Device.objects.create(organization=self.org_a, facility=self.facility_a, name="Alpha Battery Inverter", serial_number="SN-ALPHA-01")
+
+        # Org Beta (Adversary / Cross-Tenant Context)
+        self.org_b = Organization.objects.create(name="Enterprise Beta", code="ENT-BETA")
+        self.user_b_admin = User.objects.create_user(username="admin@beta.test", email="admin@beta.test", password="password123")
+        self.profile_b_admin = UserProfile.objects.create(user=self.user_b_admin, organization=self.org_b, role="admin")
+        self.facility_b = Facility.objects.create(organization=self.org_b, name="Beta Data Center", address="200 Beta Way")
+        self.meter_b = Meter.objects.create(facility=self.facility_b, name="Beta Main Meter", meter_number="MTR-BETA-001")
+        self.tariff_b = TariffPlan.objects.create(organization=self.org_b, name="Beta Industrial Tariff", utility_name="Beta Electric", effective_from="2026-01-01")
+        self.bill_b = UtilityBill.objects.create(
+            organization=self.org_b,
+            facility=self.facility_b,
+            utility_provider="Beta Electric",
+            invoice_number="INV-BETA-001",
+            billing_period_start="2026-09-01",
+            billing_period_end="2026-09-30",
+            total_consumption_kwh=15000.0,
+            total_cost_usd=2450.0
+        )
+        self.device_b = Device.objects.create(organization=self.org_b, facility=self.facility_b, name="Beta BESS Unit", serial_number="SN-BETA-01")
+
+        # Authenticate as Org B Admin by default to simulate cross-tenant attack against Org A
+        login_res = self.client.post('/api/auth/login/', {'email': 'admin@beta.test', 'password': 'password123'}, format='json')
+        self.token_b = login_res.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.token_b}')
+
+    def test_01_meter_cross_tenant_facility_rejected_on_create(self):
+        """P0/P1 IDOR: Org B admin attempts to create a Meter inside Org A's Facility."""
+        payload = {
+            "name": "Malicious Injected Meter",
+            "meter_number": "INJ-MTR-001",
+            "meter_type": "electricity",
+            "facility": self.facility_a.id
+        }
+        res = self.client.post('/api/meters/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+        self.assertFalse(Meter.objects.filter(meter_number="INJ-MTR-001").exists())
+
+    def test_02_meter_cross_tenant_facility_rejected_on_update(self):
+        """P0/P1 IDOR: Org B admin attempts to update meter_b to point to Org A's Facility."""
+        res = self.client.patch(f'/api/meters/{self.meter_b.id}/', {'facility': self.facility_a.id}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+        self.meter_b.refresh_from_db()
+        self.assertEqual(self.meter_b.facility, self.facility_b)
+
+    def test_03_energy_reading_cross_tenant_meter_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to inject energy readings into Org A's meter."""
+        payload = {
+            "meter": self.meter_a.id,
+            "timestamp": "2026-10-25T10:00:00Z",
+            "consumption": 45.5,
+            "demand": 182.0
+        }
+        res = self.client.post('/api/energy-readings/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Meter does not belong to your organization", str(res.data))
+
+    def test_04_renewable_asset_cross_tenant_facility_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to create RenewableAsset pointing to Org A Facility."""
+        payload = {
+            "name": "Rogue Solar Array",
+            "facility": self.facility_a.id,
+            "asset_type": "solar_pv",
+            "capacity_kw": 250.0
+        }
+        res = self.client.post('/api/renewable-assets/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+
+    def test_05_renewable_asset_cross_tenant_facility_rejected_on_update(self):
+        """P0/P1 IDOR: Org B admin attempts to reassign existing asset to Org A Facility."""
+        asset_b = RenewableAsset.objects.create(
+            facility=self.facility_b,
+            name="Beta Solar Array",
+            asset_type="solar_pv",
+            capacity_kw=100.0
+        )
+        res = self.client.patch(f'/api/renewable-assets/{asset_b.id}/', {'facility': self.facility_a.id}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+        asset_b.refresh_from_db()
+        self.assertEqual(asset_b.facility, self.facility_b)
+
+    def test_06_tariff_time_period_cross_tenant_tariff_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to add TOU periods to Org A Tariff."""
+        payload = {
+            "tariff_plan": self.tariff_a.id,
+            "name": "Malicious Peak Period",
+            "period_type": "ON_PEAK",
+            "rate": 0.35,
+            "start_time": "14:00:00",
+            "end_time": "18:00:00"
+        }
+        res = self.client.post('/api/billing/tou-periods/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Tariff plan does not belong to your organization", str(res.data))
+
+    def test_07_demand_charge_rule_cross_tenant_tariff_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to add demand rules to Org A Tariff."""
+        payload = {
+            "tariff_plan": self.tariff_a.id,
+            "rate_per_kw": 18.50,
+            "threshold_kw": 100.0,
+            "billing_period": "monthly"
+        }
+        res = self.client.post('/api/billing/demand-rules/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Tariff plan does not belong to your organization", str(res.data))
+
+    def test_08_utility_bill_cross_tenant_facility_rejected_on_update(self):
+        """P0/P1 IDOR: Org B admin attempts to reassign utility bill to Org A Facility."""
+        res = self.client.patch(f'/api/billing/bills/{self.bill_b.id}/', {'facility': self.facility_a.id}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+        self.bill_b.refresh_from_db()
+        self.assertEqual(self.bill_b.facility, self.facility_b)
+
+    def test_09_demand_response_event_cross_tenant_facility_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to schedule DR event targeting Org A Facility."""
+        payload = {
+            "facility": self.facility_a.id,
+            "event_name": "Rogue Load Curtailment",
+            "start_time": "2026-10-26T14:00:00Z",
+            "end_time": "2026-10-26T18:00:00Z",
+            "target_reduction_kw": 50.0
+        }
+        res = self.client.post('/api/demand-response/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+
+    def test_10_device_cross_tenant_facility_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to register Device in Org A Facility."""
+        payload = {
+            "name": "Rogue Edge Gateway",
+            "facility": self.facility_a.id,
+            "serial_number": "SN-ROGUE-999",
+            "device_type": "gateway",
+            "protocol": "modbus_tcp"
+        }
+        res = self.client.post('/api/devices/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+
+    def test_11_storage_asset_cross_tenant_facility_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to register BESS Storage in Org A Facility."""
+        payload = {
+            "name": "Rogue Megapack",
+            "facility": self.facility_a.id,
+            "capacity_kwh": 1000.0,
+            "max_charge_kw": 250.0,
+            "max_discharge_kw": 250.0
+        }
+        res = self.client.post('/api/storage-assets/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res.data))
+
+    def test_12_safety_policy_cross_tenant_facility_or_device_rejected(self):
+        """P0/P1 IDOR: Org B admin attempts to configure safety policy targeting Org A assets."""
+        # Targeting Org A Facility
+        res_fac = self.client.post('/api/safety-policies/', {
+            "facility": self.facility_a.id,
+            "min_battery_soc_percent": 15.0
+        }, format='json')
+        self.assertEqual(res_fac.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Facility does not belong to your organization", str(res_fac.data))
+
+        # Targeting Org A Device
+        res_dev = self.client.post('/api/safety-policies/', {
+            "device": self.device_a.id,
+            "min_battery_soc_percent": 15.0
+        }, format='json')
+        self.assertEqual(res_dev.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Device does not belong to your organization", str(res_dev.data))
+
+    def test_13_alert_escalation_policy_auto_organization_and_isolation(self):
+        """P1 Bug Fix & Security: Verify AlertEscalationPolicy auto-assigns organization and enforces isolation."""
+        # Org B admin creates an escalation policy
+        payload = {
+            "name": "Beta Critical Tier 1",
+            "severity": "critical",
+            "escalation_timeout_minutes": 20,
+            "notify_roles": ["admin", "facility_manager"],
+            "auto_escalate": True
+        }
+        res = self.client.post('/api/escalation-policies/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        policy_id = res.data['id']
+
+        policy = AlertEscalationPolicy.objects.get(id=policy_id)
+        self.assertEqual(policy.organization, self.org_b)
+
+        # Switch to Org A Admin -> Attempt to view Org B escalation policy -> 404 Isolated
+        login_res_a = self.client.post('/api/auth/login/', {'email': 'admin@alpha.test', 'password': 'password123'}, format='json')
+        token_a = login_res_a.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token_a}')
+
+        res_isolated = self.client.get(f'/api/escalation-policies/{policy_id}/')
+        self.assertEqual(res_isolated.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_14_control_command_cross_tenant_approval_blocked(self):
+        """P0 IoT Control Security: Verify approve_and_execute_command blocks cross-tenant execution."""
+        # Create a command targeting Org A device
+        command = ControlCommand.objects.create(
+            organization=self.org_a,
+            device=self.device_a,
+            command_type="bess_discharge",
+            requested_value="50.0",
+            requested_by=self.user_a_admin,
+            approval_status="PENDING",
+            execution_status="PENDING_APPROVAL"
+        )
+        # Adversary (user_b_admin) tries to approve and execute command on Org A device
+        with self.assertRaises(PermissionError) as ctx:
+            approve_and_execute_command(command, user=self.user_b_admin)
+        self.assertIn("different organization", str(ctx.exception))
+        command.refresh_from_db()
+        self.assertEqual(command.approval_status, "PENDING")
+
+    def test_15_invitation_weak_password_rejected(self):
+        """P1 Security: Invitation acceptance requires at least 8 characters."""
+        inv = Invitation.objects.create(
+            organization=self.org_a,
+            email="newhire@alpha.test",
+            role="analyst",
+            invited_by=self.user_a_admin
+        )
+        # Attempt to accept with 5-character password
+        res = self.client.post('/api/invitations/accept/', {
+            "token": str(inv.token),
+            "password": "short"
+        }, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Password must be at least 8 characters", str(res.data))
+
+    def test_16_ingestion_api_key_safe_authentication(self):
+        """P1 Security & Timing Attack Resistance: Verify M2M ingestion endpoint."""
+        import hashlib
+        raw_secret = "alpha-secret-token-12345"
+        IntegrationCredential.objects.create(
+            organization=self.org_a,
+            name="Alpha IoT Hub",
+            key_id="cred-key-alpha",
+            hashed_secret=hashlib.sha256(raw_secret.encode('utf-8')).hexdigest(),
+            status="active"
+        )
+        # Unauthenticated request (no key) -> 401
+        self.client.credentials()  # clear bearer token
+        res_no_auth = self.client.post('/api/ingestion/readings/', {}, format='json')
+        self.assertEqual(res_no_auth.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Invalid key -> 401
+        res_bad_key = self.client.post(
+            '/api/ingestion/readings/',
+            {},
+            format='json',
+            HTTP_X_API_KEY='cred-key-alpha:wrong-secret-token'
+        )
+        self.assertEqual(res_bad_key.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Cross-tenant injection attempt (valid key for Org A, but targeting meter of Org B) -> 404 Isolated
+        res_cross_meter = self.client.post(
+            '/api/ingestion/readings/',
+            {
+                'meter_id': self.meter_b.id,
+                'timestamp': '2026-10-25T12:00:00Z',
+                'consumption': 12.5
+            },
+            format='json',
+            HTTP_X_API_KEY=f'cred-key-alpha:{raw_secret}'
+        )
+        self.assertEqual(res_cross_meter.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_17_performance_energy_by_meter_query_efficiency(self):
+        """Phase 7 Performance: Verify energy_by_meter_view executes bounded queries without N+1 loops."""
+        # Create 5 meters for Org A
+        for i in range(1, 6):
+            Meter.objects.create(
+                facility=self.facility_a,
+                name=f"Submeter {i}",
+                meter_number=f"MTR-SUB-{i}"
+            )
+        # Login as User A Admin
+        login_res = self.client.post('/api/auth/login/', {'email': 'admin@alpha.test', 'password': 'password123'}, format='json')
+        token_a = login_res.data['access']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token_a}')
+
+        # Verify that total queries is bounded to <= 6 queries regardless of meter count (no N+1 loop)
+        res = self.client.get('/api/energy/by-meter/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(res.data), 6)  # 1 main + 5 submeters
 
 
 

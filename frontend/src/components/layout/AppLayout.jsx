@@ -36,26 +36,6 @@ export default function AppLayout() {
         />
 
         <main style={{ flex: 1, padding: '1.5rem 1.75rem', overflowY: 'auto' }}>
-          {/* Demo Data Banner Warning - Required by Prompt: Clearly mark demo data */}
-          <div style={{
-            background: '#ecfdf5',
-            border: '1px solid #a7f3d0',
-            borderRadius: 'var(--radius-md)',
-            padding: '0.625rem 1rem',
-            marginBottom: '1.25rem',
-            fontSize: '0.8125rem',
-            color: '#065f46',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between'
-          }}>
-            <div>
-              <strong>System Active:</strong> Telemetry Analytics Engine, Quality Engine, Anomaly Detection & IoT Ingestion Active.
-            </div>
-            <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', fontWeight: 600, background: '#d1fae5', padding: '0.125rem 0.5rem', borderRadius: '4px' }}>
-              Analytics Engine
-            </span>
-          </div>
 
           <Outlet context={{ selectedFacility, selectedRange, facilities }} />
         </main>

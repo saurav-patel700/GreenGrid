@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -75,7 +76,14 @@ TEMPLATES = [
 DATABASE_URL = os.environ.get('DATABASE_URL')
 DB_ENGINE = os.environ.get('DB_ENGINE', '')
 
-if DATABASE_URL:
+if 'test' in sys.argv:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': ':memory:',
+        }
+    }
+elif DATABASE_URL:
     DATABASES = {
         'default': dj_database_url.config(
             default=DATABASE_URL,
@@ -120,6 +128,12 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
+import sys
+if 'test' in sys.argv:
+    PASSWORD_HASHERS = [
+        'django.contrib.auth.hashers.MD5PasswordHasher',
+    ]
+
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True
@@ -128,9 +142,11 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+os.makedirs(STATIC_ROOT, exist_ok=True)
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -147,10 +163,20 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 50,
 }
 
-# Simple JWT Settings
+# Simple JWT Settings (Permanent / Never Expire)
+JWT_NEVER_EXPIRE = os.environ.get('JWT_NEVER_EXPIRE', 'True').lower() in ('true', '1', 'yes')
+
+if JWT_NEVER_EXPIRE:
+    # 100 years lifetime (effectively permanent / never expires)
+    JWT_ACCESS_LIFETIME = timedelta(days=36500)
+    JWT_REFRESH_LIFETIME = timedelta(days=36500)
+else:
+    JWT_ACCESS_LIFETIME = timedelta(minutes=int(os.environ.get('JWT_ACCESS_LIFETIME_MINUTES', 60)))
+    JWT_REFRESH_LIFETIME = timedelta(days=int(os.environ.get('JWT_REFRESH_LIFETIME_DAYS', 7)))
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.environ.get('JWT_ACCESS_LIFETIME_MINUTES', 60))),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.environ.get('JWT_REFRESH_LIFETIME_DAYS', 7))),
+    'ACCESS_TOKEN_LIFETIME': JWT_ACCESS_LIFETIME,
+    'REFRESH_TOKEN_LIFETIME': JWT_REFRESH_LIFETIME,
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True,
@@ -164,7 +190,7 @@ SIMPLE_JWT = {
 }
 
 # CORS & CSRF Configuration
-CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'True').lower() in ('true', '1', 'yes')
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'True' if DEBUG else 'False').lower() in ('true', '1', 'yes')
 cors_env = os.environ.get('CORS_ALLOWED_ORIGINS', '')
 if cors_env:
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_env.split(',') if origin.strip()]
@@ -189,6 +215,7 @@ if RENDER_EXTERNAL_HOSTNAME:
 EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@greengrid.example')
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID') or os.environ.get('VITE_GOOGLE_CLIENT_ID', '')
 
 # Structured Observability & Logging Configuration
 LOGGING = {

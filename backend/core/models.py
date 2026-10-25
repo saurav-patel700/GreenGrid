@@ -33,6 +33,8 @@ class UserProfile(models.Model):
     role = models.CharField(max_length=30, choices=ROLE_CHOICES, default='facility_manager')
     phone = models.CharField(max_length=50, blank=True, default='')
     department = models.CharField(max_length=100, blank=True, default='Operations')
+    google_sub = models.CharField(max_length=255, blank=True, null=True, unique=True, db_index=True)
+    picture = models.URLField(max_length=500, blank=True, default='')
 
     def __str__(self):
         return f"{self.user.username} ({self.role} @ {self.organization.code})"

@@ -59,7 +59,19 @@ export async function apiRequest(endpoint, options = {}) {
   }
 
   if (!res.ok) {
-    const errorMsg = data?.error || data?.detail || (typeof data === 'string' ? data : 'API Request Failed');
+    let errorMsg = data?.error || data?.detail;
+    if (!errorMsg) {
+      if (typeof data === 'string') {
+        errorMsg = data;
+      } else if (data && typeof data === 'object') {
+        const messages = Object.entries(data)
+          .map(([key, val]) => `${key}: ${Array.isArray(val) ? val.join(' ') : val}`)
+          .join(' | ');
+        errorMsg = messages || 'API Request Failed';
+      } else {
+        errorMsg = 'API Request Failed';
+      }
+    }
     throw new Error(errorMsg);
   }
 
@@ -92,6 +104,23 @@ export async function loginApi(email, password) {
   const data = await apiRequest('/auth/login/', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+    skipAuth: true
+  });
+  setTokens(data.access, data.refresh);
+  localStorage.setItem('greengrid_user_data', JSON.stringify(data.user));
+  return data;
+}
+
+export async function loginWithGoogleApi(credential, organizationName = null, invitationToken = null, autoProvision = true) {
+  clearTokens();
+  const payload = { credential };
+  if (organizationName) payload.organization_name = organizationName;
+  if (invitationToken) payload.invitation_token = invitationToken;
+  if (autoProvision) payload.auto_provision = true;
+
+  const data = await apiRequest('/auth/google/', {
+    method: 'POST',
+    body: JSON.stringify(payload),
     skipAuth: true
   });
   setTokens(data.access, data.refresh);

@@ -46,7 +46,6 @@ import DeviceManagementPage from './pages/app/DeviceManagementPage';
 import ScenarioSimulatorPage from './pages/app/ScenarioSimulatorPage';
 import Alerts from './pages/app/Alerts';
 import Reports from './pages/app/Reports';
-import IntegrationsApp from './pages/app/IntegrationsApp';
 import ProfileSettings from './pages/app/ProfileSettings';
 import UserManagement from './pages/app/UserManagement';
 import OrganizationSettings from './pages/app/OrganizationSettings';
@@ -123,11 +122,7 @@ export default function App() {
               <Route path="automation" element={<AutomationPage />} />
 
               
-              <Route path="integrations" element={
-                <ProtectedRoute allowedRoles={['admin', 'facility_manager']}>
-                  <IntegrationsApp />
-                </ProtectedRoute>
-              } />
+              <Route path="integrations" element={<Navigate to="/app" replace />} />
 
               <Route path="settings" element={<Navigate to="/app/settings/profile" replace />} />
               <Route path="settings/profile" element={<ProfileSettings />} />

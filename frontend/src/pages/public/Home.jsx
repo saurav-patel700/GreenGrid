@@ -53,8 +53,8 @@ export default function Home() {
             </p>
 
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
-              <Link to="/contact" className="btn btn-primary" style={{ padding: '0.75rem 1.5rem', fontSize: '1rem' }}>
-                Request a demo
+              <Link to="/register" className="btn btn-primary" style={{ padding: '0.75rem 1.5rem', fontSize: '1rem' }}>
+                Get Started
                 <ArrowRight size={18} />
               </Link>
               <Link to="/platform" className="btn btn-secondary" style={{ padding: '0.75rem 1.5rem', fontSize: '1rem' }}>
@@ -82,7 +82,7 @@ export default function Home() {
                 </span>
               </div>
               <Link to="/app" className="btn btn-dark btn-sm">
-                Launch Live Demo Dashboard
+                Launch Dashboard
               </Link>
             </div>
 
@@ -243,11 +243,11 @@ export default function Home() {
             Schedule an operational walk-through with our energy engineering team or explore the interactive dashboard shell directly.
           </p>
           <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
-            <Link to="/contact" className="btn btn-primary" style={{ padding: '0.75rem 1.75rem', fontSize: '1rem' }}>
-              Request a demo
+            <Link to="/register" className="btn btn-primary" style={{ padding: '0.75rem 1.75rem', fontSize: '1rem' }}>
+              Get Started
             </Link>
             <Link to="/app" className="btn btn-secondary" style={{ padding: '0.75rem 1.75rem', fontSize: '1rem' }}>
-              Open Interactive Shell
+              Open Dashboard
             </Link>
           </div>
         </div>

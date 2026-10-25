@@ -21,7 +21,7 @@ export default function Contact() {
       <section style={{ background: '#ffffff', borderBottom: '1px solid var(--color-border)', padding: '3.5rem 0' }}>
         <div className="container" style={{ maxWidth: '800px', textAlign: 'center' }}>
           <h1 style={{ fontSize: '2.5rem', fontWeight: 800, color: 'var(--color-text-primary)', letterSpacing: '-0.03em', marginBottom: '1rem' }}>
-            Request a Technical Demo or Evaluation
+            Contact Our Enterprise Team
           </h1>
           <p style={{ fontSize: '1.125rem', color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
             Speak with an energy engineering specialist to evaluate GreenGrid for your organization's facilities.
@@ -165,7 +165,7 @@ export default function Contact() {
 
                   <button type="submit" className="btn btn-primary" style={{ padding: '0.75rem', width: '100%', justifyContent: 'center' }}>
                     <Send size={16} />
-                    Submit Demo Request
+                    Submit Inquiry
                   </button>
                 </form>
               )}

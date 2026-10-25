@@ -30,7 +30,6 @@ export default function AppSidebar({ mobileOpen, onClose }) {
     { name: 'Alerts', path: '/app/alerts', icon: AlertTriangle, badge: 3, roles: ['admin', 'facility_manager', 'analyst', 'viewer'] },
     { name: 'Reports', path: '/app/reports', icon: FileText, roles: ['admin', 'facility_manager', 'analyst', 'viewer'] },
     { name: 'System Health', path: '/app/system-health', icon: Cpu, roles: ['admin'] },
-    { name: 'Integrations', path: '/app/integrations', icon: Cpu, roles: ['admin', 'facility_manager'] },
     { name: 'User Management', path: '/app/settings/users', icon: Users, roles: ['admin'] },
     { name: 'Audit Log', path: '/app/settings/audit-log', icon: ShieldCheck, roles: ['admin'] },
     { name: 'Settings', path: '/app/settings/profile', icon: Settings, roles: ['admin', 'facility_manager', 'analyst', 'viewer'] },

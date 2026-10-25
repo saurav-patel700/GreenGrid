@@ -55,8 +55,8 @@ export default function PublicHeader() {
           <Link to="/app" className="btn btn-secondary">
             Sign in
           </Link>
-          <Link to="/contact" className="btn btn-primary">
-            Request a demo
+          <Link to="/register" className="btn btn-primary">
+            Get Started
             <ArrowRight size={15} />
           </Link>
         </div>
@@ -93,8 +93,8 @@ export default function PublicHeader() {
             <Link to="/app" className="btn btn-secondary" style={{ width: '100%', justifyContent: 'center' }}>
               Sign in
             </Link>
-            <Link to="/contact" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
-              Request a demo
+            <Link to="/register" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
+              Get Started
             </Link>
           </div>
         </div>
