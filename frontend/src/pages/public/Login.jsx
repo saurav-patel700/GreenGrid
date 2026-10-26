@@ -18,7 +18,7 @@ export default function Login() {
 
   const googleBtnContainerRef = useRef(null);
   const gsiInitializedRef = useRef(false);
-  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+  const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim();
   const from = location.state?.from?.pathname || '/app';
 
   const [pendingGoogleCredential, setPendingGoogleCredential] = useState(null);

@@ -18,11 +18,11 @@ export function WebSocketProvider({ children }) {
     }
 
     const token = getAccessToken();
-    let wsBaseUrl = import.meta.env.VITE_WS_URL;
+    let wsBaseUrl = (import.meta.env.VITE_WS_URL || '').trim();
     if (!wsBaseUrl) {
       if (import.meta.env.VITE_API_BASE_URL) {
         try {
-          const parsed = new URL(import.meta.env.VITE_API_BASE_URL);
+          const parsed = new URL(import.meta.env.VITE_API_BASE_URL.trim());
           const proto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
           wsBaseUrl = `${proto}//${parsed.host}`;
         } catch {
