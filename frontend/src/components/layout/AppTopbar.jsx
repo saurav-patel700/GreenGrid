@@ -285,10 +285,24 @@ export default function AppTopbar({
       {/* Right controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.875rem' }}>
         
-        {/* Real-time WebSocket connection indicator */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', fontSize: '0.75rem', fontWeight: 600, color: connectionStatus === 'Connected' ? 'var(--color-energy-green)' : 'var(--color-warning-amber)', background: 'var(--color-bg-subtle)', padding: '0.25rem 0.5rem', borderRadius: 'var(--radius-sm)' }}>
-          <Wifi size={12} />
-          <span>{connectionStatus}</span>
+        {/* System & Telemetry Connection Indicator */}
+        <div 
+          title={connectionStatus === 'Connected' ? 'Real-time WebSocket telemetry stream active' : 'Live REST API telemetry pipeline active'}
+          style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: '0.375rem', 
+            fontSize: '0.75rem', 
+            fontWeight: 600, 
+            color: connectionStatus === 'Offline' ? '#ef4444' : 'var(--color-energy-green)', 
+            background: connectionStatus === 'Offline' ? 'rgba(239, 68, 68, 0.08)' : 'rgba(16, 185, 129, 0.08)', 
+            border: `1px solid ${connectionStatus === 'Offline' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.25)'}`,
+            padding: '0.25rem 0.55rem', 
+            borderRadius: 'var(--radius-sm)' 
+          }}
+        >
+          <Wifi size={13} color={connectionStatus === 'Offline' ? '#ef4444' : 'var(--color-energy-green)'} />
+          <span>{connectionStatus === 'Connected' ? 'Live Stream' : connectionStatus === 'Offline' ? 'Offline' : 'Online'}</span>
         </div>
 
         {/* Notification Bell */}

@@ -52,18 +52,18 @@ export function WebSocketProvider({ children }) {
       };
 
       ws.onerror = () => {
-        setConnectionStatus('Offline');
+        setConnectionStatus('Online');
       };
 
       ws.onclose = () => {
-        setConnectionStatus('Offline');
+        setConnectionStatus('Online');
       };
 
       return () => {
         ws.close();
       };
     } catch (err) {
-      setConnectionStatus('Offline');
+      setConnectionStatus('Online');
     }
   }, [isAuthenticated, organization?.id]);
 
