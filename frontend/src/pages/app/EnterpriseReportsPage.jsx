@@ -52,7 +52,8 @@ export default function EnterpriseReportsPage() {
   const handleExportCSV = () => {
     const token = getAccessToken();
     const facilityParam = selectedFacility && selectedFacility !== 'all' ? `&facility=${selectedFacility}` : '';
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+    const rawBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api').replace(/\/+$/, '');
+    const baseUrl = rawBase.endsWith('/api') ? rawBase : `${rawBase}/api`;
     window.location.href = `${baseUrl}/reports/generate/?report_type=${reportType}&days=${days}&format=csv${facilityParam}&token=${token}`;
   };
 
